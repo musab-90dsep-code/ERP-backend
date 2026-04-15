@@ -27,4 +27,4 @@ venv.bak/
 *.swo
 
 # Render build artifacts
-build.sh
+# build.sh
