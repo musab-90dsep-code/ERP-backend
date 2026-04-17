@@ -2,7 +2,7 @@ from rest_framework import serializers
 from app.models import (
     Employee, Attendance, EmployeeTransaction, Contact, ContactEmployee,
     Product, Invoice, InvoiceItem, Payment, Check, InternalAccount,
-    ProcessingOrder, Order, StockHistory, DailyExpense
+    ProcessingOrder, Order, StockHistory, DailyExpense, AddMoney
 )
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -121,4 +121,9 @@ class StockHistorySerializer(serializers.ModelSerializer):
 class DailyExpenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = DailyExpense
+        fields = '__all__'
+
+class AddMoneySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AddMoney
         fields = '__all__'

@@ -213,3 +213,16 @@ class DailyExpense(models.Model):
     photo_urls = models.JSONField(default=list, blank=True)
     authorized_signature = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+class AddMoney(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    memo_no = models.CharField(max_length=100, unique=True)
+    date = models.DateField()
+    purpose = models.CharField(max_length=255)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    note = models.TextField(null=True, blank=True)
+    photo_urls = models.JSONField(default=list, blank=True)
+    payment_method = models.CharField(max_length=50, default='cash')
+    payment_method_details = models.JSONField(default=dict, blank=True)
+    authorized_signature = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)

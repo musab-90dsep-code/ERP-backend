@@ -12,7 +12,7 @@ from datetime import timedelta
 from app.models import (
     Employee, Attendance, EmployeeTransaction, Contact, ContactEmployee,
     Product, Invoice, InvoiceItem, Payment, Check, InternalAccount,
-    ProcessingOrder, Order, StockHistory, DailyExpense
+    ProcessingOrder, Order, StockHistory, DailyExpense, AddMoney
 )
 
 # Import Serializers
@@ -20,7 +20,7 @@ from app.serializers import (
     EmployeeSerializer, AttendanceSerializer, EmployeeTransactionSerializer,
     ContactSerializer, ContactEmployeeSerializer, ProductSerializer,
     InvoiceSerializer, InvoiceItemSerializer, PaymentSerializer, CheckSerializer,
-    InternalAccountSerializer, ProcessingOrderSerializer, OrderSerializer, StockHistorySerializer, DailyExpenseSerializer
+    InternalAccountSerializer, ProcessingOrderSerializer, OrderSerializer, StockHistorySerializer, DailyExpenseSerializer, AddMoneySerializer
 )
 
 # Mapping string names to their respective models and serializers
@@ -40,6 +40,7 @@ MODEL_REGISTRY = {
     'order': (Order, OrderSerializer),
     'stock_history': (StockHistory, StockHistorySerializer),
     'daily_expense': (DailyExpense, DailyExpenseSerializer),
+    'add_money': (AddMoney, AddMoneySerializer),
 }
 
 class UnifiedAPIView(APIView):
@@ -104,8 +105,12 @@ class UnifiedAPIView(APIView):
             }
 
             # Get current running totals as base
-            current_total_received = float(Payment.objects.filter(type='received').aggregate(s=Sum('amount'))['s'] or 0)
-            current_total_paid = float(Payment.objects.filter(type='paid').aggregate(s=Sum('amount'))['s'] or 0)
+            current_total_received = float(Payment.objects.filter(type='in').aggregate(s=Sum('amount'))['s'] or 0)
+            current_total_received += float(AddMoney.objects.aggregate(s=Sum('amount'))['s'] or 0)
+            
+            current_total_paid = float(Payment.objects.filter(type='out').aggregate(s=Sum('amount'))['s'] or 0)
+            current_total_paid += float(DailyExpense.objects.filter(status='paid').aggregate(s=Sum('total_amount'))['s'] or 0)
+            
             running_balance = current_total_received - current_total_paid
             
             # Stock Value Calculation
@@ -125,8 +130,13 @@ class UnifiedAPIView(APIView):
                 
                 # 2. Balance History (Calculate backwards)
                 balance_history.append(running_balance)
-                day_received = float(Payment.objects.filter(type='received', date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
-                day_paid = float(Payment.objects.filter(type='paid', date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                
+                day_received = float(Payment.objects.filter(type='in', date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                day_received += float(AddMoney.objects.filter(date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                
+                day_paid = float(Payment.objects.filter(type='out', date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                day_paid += float(DailyExpense.objects.filter(status='paid', date=target_date).aggregate(s=Sum('total_amount'))['s'] or 0)
+                
                 running_balance -= (day_received - day_paid)
                 
                 # 3. Stock Value History (Calculate backwards using StockHistory)
@@ -140,8 +150,11 @@ class UnifiedAPIView(APIView):
             stock_history_values.reverse()
 
             # Recents
-            recent_employees = EmployeeSerializer(Employee.objects.order_by('-created_at')[:5], many=True, context={'request': request}).data
-            recent_invoices = InvoiceSerializer(Invoice.objects.order_by('-created_at')[:5], many=True, context={'request': request}).data
+            # Recents
+            recent_employees = EmployeeSerializer(Employee.objects.select_related().order_by('-created_at')[:5], many=True, context={'request': request}).data
+            
+            recent_inv_qs = Invoice.objects.select_related('contact').prefetch_related('items__product', 'payments').order_by('-created_at')[:5]
+            recent_invoices = InvoiceSerializer(recent_inv_qs, many=True, context={'request': request}).data
 
             return Response({
                 'total_products': total_products,
