@@ -105,7 +105,7 @@ class UnifiedAPIView(APIView):
             
             payments_out = Payment.objects.filter(type='out')
             daily_exp = DailyExpense.objects.filter(status='paid')
-            emp_trans = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance'])
+            emp_trans = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance'])
 
             expenses_by_period = {
                 'day': float((payments_out.filter(date__gte=today_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
@@ -242,7 +242,7 @@ class UnifiedAPIView(APIView):
             # Full Outflow (Payments Out + Daily Expenses + Employee Transactions)
             all_p_out = Payment.objects.filter(type='out').select_related('contact').order_by('-date', '-created_at')
             all_de = DailyExpense.objects.all().order_by('-date', '-created_at')
-            all_et = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance']).select_related('employee').order_by('-date', '-created_at')
+            all_et = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance']).select_related('employee').order_by('-date', '-created_at')
             
             full_outflow = []
             for p in all_p_out:
@@ -273,7 +273,7 @@ class UnifiedAPIView(APIView):
                     'amount': float(e.amount),
                     'method': 'Cash', 
                     'date': e.date.isoformat() if e.date else None,
-                    'label': str(e.type).title()
+                    'label': str(e.type).replace('_', ' ').title()
                 })
             full_outflow.sort(key=lambda x: x['date'] or '', reverse=True)
 
