@@ -132,9 +132,9 @@ class UnifiedAPIView(APIView):
             
             running_balance = current_total_received - current_total_paid
             
-            # Total Due Calculation (Total Sell Invoices - Total Payments Received for those invoices)
-            total_sell_amount = float(Invoice.objects.filter(type='sell').aggregate(s=Sum('total'))['s'] or 0)
-            total_sell_payments = float(Payment.objects.filter(invoice__type='sell').aggregate(s=Sum('amount'))['s'] or 0)
+            # Total Due Calculation (Total Sell + Exchange Invoices - Total Payments Received for those)
+            total_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange']).aggregate(s=Sum('total'))['s'] or 0)
+            total_sell_payments = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange']).aggregate(s=Sum('amount'))['s'] or 0)
             total_due = total_sell_amount - total_sell_payments
 
             # Stock Value Calculation (keeping for base balance if needed, though removed from UI)
@@ -171,8 +171,8 @@ class UnifiedAPIView(APIView):
                 
                 # 4. Due History
                 due_history.append(running_due)
-                day_sell_amount = float(Invoice.objects.filter(type='sell', date=target_date).aggregate(s=Sum('total'))['s'] or 0)
-                day_sell_payment = float(Payment.objects.filter(invoice__type='sell', date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                day_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange'], date=target_date).aggregate(s=Sum('total'))['s'] or 0)
+                day_sell_payment = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange'], date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
                 running_due -= (day_sell_amount - day_sell_payment)
             
             sales_history.reverse()
@@ -246,6 +246,13 @@ class UnifiedAPIView(APIView):
             
             full_outflow = []
             for p in all_p_out:
+                # Determine label based on invoice type
+                label = 'Payment'
+                if p.invoice:
+                    if p.invoice.type == 'exchange':
+                        label = 'Return Refund'
+                    elif p.invoice.type == 'buy':
+                        label = 'Supplier Payment'
                 full_outflow.append({
                     'id': p.id,
                     'type': 'payment',
@@ -253,7 +260,7 @@ class UnifiedAPIView(APIView):
                     'amount': float(p.amount),
                     'method': p.method,
                     'date': p.date.isoformat() if p.date else None,
-                    'label': 'Payment'
+                    'label': label
                 })
             for d in all_de:
                 full_outflow.append({

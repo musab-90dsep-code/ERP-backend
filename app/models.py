@@ -89,6 +89,8 @@ class Product(models.Model):
     processing_price_manual = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     image_urls = models.JSONField(default=list, blank=True)
     product_heads = models.JSONField(default=list, blank=True)
+    product_quality = models.CharField(max_length=50, null=True, blank=True)
+    returned_stock_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -116,6 +118,8 @@ class InvoiceItem(models.Model):
     quantity = models.DecimalField(max_digits=12, decimal_places=3, default=1)
     price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    selected_head = models.CharField(max_length=255, null=True, blank=True)
+    is_return = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
 class Payment(models.Model):
@@ -179,6 +183,7 @@ class Order(models.Model):
     contact = models.ForeignKey(Contact, null=True, on_delete=models.SET_NULL, related_name='orders')
     contact_name = models.CharField(max_length=255, null=True, blank=True)
     items = models.JSONField(default=list, blank=True)
+    is_return = models.BooleanField(default=False)
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     status = models.CharField(max_length=50, default='pending')
     date = models.DateField()

@@ -85,8 +85,46 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         invoice = Invoice.objects.create(**validated_data)
+        
         for item_data in items_data:
-            InvoiceItem.objects.create(invoice=invoice, **item_data)
+            item = InvoiceItem.objects.create(invoice=invoice, **item_data)
+            
+            # Stock Update Logic
+            if item.product:
+                product = item.product
+                stock_before = product.stock_quantity
+                
+                # Check if it's an exchange or specific type
+                should_update_returned = False
+                if invoice.type == 'return':
+                    should_update_returned = True
+                elif invoice.type == 'exchange' and item.is_return:
+                    should_update_returned = True
+                
+                if should_update_returned:
+                    product.returned_stock_quantity += item.quantity
+                else:
+                    if invoice.type == 'sell' or invoice.type == 'exchange':
+                        product.stock_quantity -= item.quantity
+                    elif invoice.type == 'buy':
+                        product.stock_quantity += item.quantity
+                
+                product.save()
+                
+                # Create Stock History
+                from app.models import StockHistory
+                qty_change = -item.quantity if (invoice.type in ['sell', 'exchange'] and not item.is_return) else item.quantity
+                
+                StockHistory.objects.create(
+                    product=product,
+                    item_type=product.category,
+                    item_name=product.name,
+                    quantity_added=qty_change,
+                    stock_before=stock_before,
+                    stock_after=product.stock_quantity,
+                    note=f"Invoice {invoice.type}: {invoice.id} {'(Return Part)' if item.is_return else ''}"
+                )
+                
         return invoice
 
 class CheckSerializer(serializers.ModelSerializer):
