@@ -53,10 +53,27 @@ class UnifiedAPIView(APIView):
         model_name = request.data.get('model')
         obj_id = request.data.get('id')
         data = request.data.get('data', {})
+        role = request.data.get('role', 'member')
 
         if not action:
             return Response({'error': 'Missing "action" in request payload.'}, status=status.HTTP_400_BAD_REQUEST)
         
+        # ========================================================
+        # 🛡️ SECURITY: ROLE-BASED ACCESS CONTROL
+        # ========================================================
+        if action in ['create', 'update', 'delete', 'bulk_delete']:
+            if role == 'member':
+                return Response({'error': 'Members are restricted to view and download only.'}, status=status.HTTP_403_FORBIDDEN)
+            
+            if role == 'manager':
+                # Managers cannot manage employees
+                if model_name == 'employee':
+                    return Response({'error': 'Managers cannot manage employee records.'}, status=status.HTTP_403_FORBIDDEN)
+                
+                # Managers cannot delete invoices or payments
+                if action in ['delete', 'bulk_delete'] and model_name in ['invoice', 'payment']:
+                    return Response({'error': 'Managers cannot delete invoices or transactions.'}, status=status.HTTP_403_FORBIDDEN)
+
         # ========================================================
         # 🌟 SPECIAL: DASHBOARD STATS (Bypasses Model Registry)
         # ========================================================
@@ -332,7 +349,20 @@ class UnifiedAPIView(APIView):
 
             # 3. CREATE
             elif action == 'create':
-                serializer = SerializerClass(data=data, context={'request': request})
+                if model_name == 'attendance':
+                    emp_id = data.get('employee')
+                    att_date = data.get('date')
+                    if emp_id and att_date:
+                        existing = ModelClass.objects.filter(employee_id=emp_id, date=att_date).first()
+                        if existing:
+                            serializer = SerializerClass(existing, data=data, partial=True, context={'request': request})
+                        else:
+                            serializer = SerializerClass(data=data, context={'request': request})
+                    else:
+                        serializer = SerializerClass(data=data, context={'request': request})
+                else:
+                    serializer = SerializerClass(data=data, context={'request': request})
+
                 if serializer.is_valid():
                     serializer.save()
                     return Response(serializer.data, status=status.HTTP_201_CREATED)
