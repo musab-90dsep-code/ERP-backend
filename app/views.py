@@ -10,6 +10,7 @@ from datetime import timedelta
 
 # Import Models
 from app.models import (
+    Shop,
     Employee, Attendance, EmployeeTransaction, Contact, ContactEmployee,
     Product, Invoice, InvoiceItem, Payment, Check, InternalAccount,
     ProcessingOrder, Order, StockHistory, DailyExpense, AddMoney
@@ -17,6 +18,7 @@ from app.models import (
 
 # Import Serializers
 from app.serializers import (
+    ShopSerializer,
     EmployeeSerializer, AttendanceSerializer, EmployeeTransactionSerializer,
     ContactSerializer, ContactEmployeeSerializer, ProductSerializer,
     InvoiceSerializer, InvoiceItemSerializer, PaymentSerializer, CheckSerializer,
@@ -25,6 +27,7 @@ from app.serializers import (
 
 # Mapping string names to their respective models and serializers
 MODEL_REGISTRY = {
+    'shop': (Shop, ShopSerializer),
     'employee': (Employee, EmployeeSerializer),
     'attendance': (Attendance, AttendanceSerializer),
     'employee_transaction': (EmployeeTransaction, EmployeeTransactionSerializer),
@@ -43,9 +46,26 @@ MODEL_REGISTRY = {
     'add_money': (AddMoney, AddMoneySerializer),
 }
 
+# ========================================================
+# 🚀 OPTIMIZATION: N+1 Query Mapping Setup
+# ========================================================
+SELECT_RELATED_MAP = {
+    'invoice': ['contact'],
+    'payment': ['contact', 'invoice'],
+    'employee_transaction': ['employee'],
+    'attendance': ['employee'],
+    'processing_order': ['processor', 'product'],
+    'stock_history': ['product'],
+    'invoice_item': ['invoice', 'product']
+}
+
+PREFETCH_RELATED_MAP = {
+    'invoice': ['items', 'payments', 'items__product']
+}
+
 class UnifiedAPIView(APIView):
     """
-    A single API endpoint to handle all operations for all models.
+    A single API endpoint to handle all operations for all models. (Optimized)
     """
     
     def post(self, request, *args, **kwargs):
@@ -54,6 +74,14 @@ class UnifiedAPIView(APIView):
         obj_id = request.data.get('id')
         data = request.data.get('data', {})
         role = request.data.get('role', 'member')
+
+
+        shop_id = request.data.get('shop_id')
+        if shop_id and model_name != 'shop':
+            if isinstance(data, dict):
+                data['shop'] = shop_id
+            elif data is None:
+                data = {'shop': shop_id}
 
         if not action:
             return Response({'error': 'Missing "action" in request payload.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -66,16 +94,14 @@ class UnifiedAPIView(APIView):
                 return Response({'error': 'Members are restricted to view and download only.'}, status=status.HTTP_403_FORBIDDEN)
             
             if role == 'manager':
-                # Managers cannot manage employees
                 if model_name == 'employee':
                     return Response({'error': 'Managers cannot manage employee records.'}, status=status.HTTP_403_FORBIDDEN)
                 
-                # Managers cannot delete invoices or payments
                 if action in ['delete', 'bulk_delete'] and model_name in ['invoice', 'payment']:
                     return Response({'error': 'Managers cannot delete invoices or transactions.'}, status=status.HTTP_403_FORBIDDEN)
 
         # ========================================================
-        # 🌟 SPECIAL: DASHBOARD STATS (Bypasses Model Registry)
+        # 🌟 SPECIAL: DASHBOARD STATS (Optimized Queries)
         # ========================================================
         if action == 'stats':
             now = timezone.now()
@@ -85,111 +111,113 @@ class UnifiedAPIView(APIView):
             year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
             # Basic Counts
-            total_products = Product.objects.count()
-            total_invoices = Invoice.objects.count()
-            total_employees = Employee.objects.count()
-            total_checks = Check.objects.count()
+            total_products = Product.objects.filter(shop_id=shop_id).count() if shop_id else Product.objects.count()
+            total_invoices = Invoice.objects.filter(shop_id=shop_id).count() if shop_id else Invoice.objects.count()
+            total_employees = Employee.objects.filter(shop_id=shop_id).count() if shop_id else Employee.objects.count()
+            total_checks = Check.objects.filter(shop_id=shop_id).count() if shop_id else Check.objects.count()
             
             # Sub-stats
-            attendance_present = Attendance.objects.filter(date=today_start.date(), status='present').count()
-            bounced_checks = CheckSerializer(Check.objects.filter(status='bounced')[:5], many=True, context={'request': request}).data
-            low_stock_items = ProductSerializer(Product.objects.filter(stock_quantity__lte=5)[:5], many=True, context={'request': request}).data
-            
-            # High-res history for graphs (last 7 days)
-            sales_history = []
-            expenses_history = []
-            balance_history = []
-            stock_history_values = []
+            attendance_present = Attendance.objects.filter(date=today_start.date(), status='present', **({'shop_id': shop_id} if shop_id else {})).count()
+            bounced_checks = CheckSerializer(Check.objects.filter(status='bounced', **({'shop_id': shop_id} if shop_id else {}))[:5], many=True, context={'request': request}).data
+            low_stock_items = ProductSerializer(Product.objects.filter(stock_quantity__lte=5, **({'shop_id': shop_id} if shop_id else {}))[:5], many=True, context={'request': request}).data
             
             # Fetch base querysets
-            sales = Invoice.objects.filter(type='sell')
-            expenses = DailyExpense.objects.all()
+            payments_in = Payment.objects.filter(type='in', **({'shop_id': shop_id} if shop_id else {}))
+            add_money = AddMoney.objects.filter(**({'shop_id': shop_id} if shop_id else {}))
+            payments_out = Payment.objects.filter(type='out', **({'shop_id': shop_id} if shop_id else {}))
+            daily_exp = DailyExpense.objects.filter(status='paid', **({'shop_id': shop_id} if shop_id else {}))
+            emp_trans = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance'], **({'shop_id': shop_id} if shop_id else {}))
 
-            # Sales by period (Total Cash In: Payments In + Add Money)
-            payments_in = Payment.objects.filter(type='in')
-            add_money = AddMoney.objects.all()
+            # Sales by period (Total Cash In)
+            # ─── OPTIMIZED AGGREGATIONS (One query per model instead of many) ───
+            def get_period_stats(qs, field):
+                return qs.aggregate(
+                    day=Sum(Case(When(date__gte=today_start.date(), then=F(field)), default=Value(0), output_field=DecimalField())),
+                    week=Sum(Case(When(date__gte=week_start.date(), then=F(field)), default=Value(0), output_field=DecimalField())),
+                    month=Sum(Case(When(date__gte=month_start.date(), then=F(field)), default=Value(0), output_field=DecimalField())),
+                    year=Sum(Case(When(date__gte=year_start.date(), then=F(field)), default=Value(0), output_field=DecimalField())),
+                    total=Sum(field)
+                )
+
+            p_in_stats = get_period_stats(payments_in, 'amount')
+            am_stats = get_period_stats(add_money, 'amount')
 
             sales_by_period = {
-                'day': float((payments_in.filter(date__gte=today_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                             (add_money.filter(date__gte=today_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'week': float((payments_in.filter(date__gte=week_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                              (add_money.filter(date__gte=week_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'month': float((payments_in.filter(date__gte=month_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                               (add_money.filter(date__gte=month_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'year': float((payments_in.filter(date__gte=year_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                              (add_money.filter(date__gte=year_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
+                k: float((p_in_stats[k] or 0) + (am_stats[k] or 0)) 
+                for k in ['day', 'week', 'month', 'year']
             }
-            
-            payments_out = Payment.objects.filter(type='out')
-            daily_exp = DailyExpense.objects.filter(status='paid')
-            emp_trans = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance'])
+            current_total_received = float((p_in_stats['total'] or 0) + (am_stats['total'] or 0))
+
+            p_out_stats = get_period_stats(payments_out, 'amount')
+            de_stats = get_period_stats(daily_exp, 'total_amount')
+            et_stats = get_period_stats(emp_trans, 'amount')
 
             expenses_by_period = {
-                'day': float((payments_out.filter(date__gte=today_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                             (daily_exp.filter(date__gte=today_start.date()).aggregate(s=Sum('total_amount'))['s'] or 0) +
-                             (emp_trans.filter(date__gte=today_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'week': float((payments_out.filter(date__gte=week_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                              (daily_exp.filter(date__gte=week_start.date()).aggregate(s=Sum('total_amount'))['s'] or 0) +
-                              (emp_trans.filter(date__gte=week_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'month': float((payments_out.filter(date__gte=month_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                               (daily_exp.filter(date__gte=month_start.date()).aggregate(s=Sum('total_amount'))['s'] or 0) +
-                               (emp_trans.filter(date__gte=month_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
-                'year': float((payments_out.filter(date__gte=year_start.date()).aggregate(s=Sum('amount'))['s'] or 0) + 
-                              (daily_exp.filter(date__gte=year_start.date()).aggregate(s=Sum('total_amount'))['s'] or 0) +
-                              (emp_trans.filter(date__gte=year_start.date()).aggregate(s=Sum('amount'))['s'] or 0)),
+                k: float((p_out_stats[k] or 0) + (de_stats[k] or 0) + (et_stats[k] or 0))
+                for k in ['day', 'week', 'month', 'year']
             }
+            current_total_paid = float((p_out_stats['total'] or 0) + (de_stats['total'] or 0) + (et_stats['total'] or 0))
 
-            # Get current running totals as base for balance calculation
-            current_total_received = float(payments_in.aggregate(s=Sum('amount'))['s'] or 0)
-            current_total_received += float(add_money.aggregate(s=Sum('amount'))['s'] or 0)
-            
-            current_total_paid = float(payments_out.aggregate(s=Sum('amount'))['s'] or 0)
-            current_total_paid += float(daily_exp.aggregate(s=Sum('total_amount'))['s'] or 0)
-            current_total_paid += float(emp_trans.aggregate(s=Sum('amount'))['s'] or 0)
-            
+            # Balance Calculations
             running_balance = current_total_received - current_total_paid
             
-            # Total Due Calculation (Total Sell + Exchange Invoices - Total Payments Received for those)
-            total_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange']).aggregate(s=Sum('total'))['s'] or 0)
-            total_sell_payments = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange']).aggregate(s=Sum('amount'))['s'] or 0)
+            # Total Due Calculation
+            total_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})).aggregate(s=Sum('total'))['s'] or 0)
+            total_sell_payments = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})).aggregate(s=Sum('amount'))['s'] or 0)
             total_due = total_sell_amount - total_sell_payments
 
-            # Stock Value Calculation (keeping for base balance if needed, though removed from UI)
-            current_stock_val = float(Product.objects.aggregate(
-                total=Sum(F('stock_quantity') * F('price'), output_field=DecimalField())
-            )['total'] or 0)
+            # Stock Value Calculation
+            current_stock_val = float(Product.objects.filter(**({'shop_id': shop_id} if shop_id else {})).aggregate(total=Sum(F('stock_quantity') * F('price'), output_field=DecimalField()))['total'] or 0)
             running_stock_val = current_stock_val
-            
             running_due = total_due
-            due_history = []
+
+            # ========================================================
+            # 🚀 OPTIMIZED: AGGREGATE 7-DAY HISTORY VIA DB
+            # ========================================================
+            seven_days_ago_date = today_start.date() - timedelta(days=7)
+            
+            def get_daily_sums(queryset, amount_field, date_field='date'):
+                return dict(queryset.filter(**{f"{date_field}__gte": seven_days_ago_date})
+                            .values(date_field)
+                            .annotate(total=Sum(amount_field))
+                            .values_list(date_field, 'total'))
+
+            sums_p_in = get_daily_sums(Payment.objects.filter(type='in', **({'shop_id': shop_id} if shop_id else {})), 'amount')
+            sums_am = get_daily_sums(AddMoney.objects.filter(**({'shop_id': shop_id} if shop_id else {})), 'amount')
+            sums_p_out = get_daily_sums(Payment.objects.filter(type='out', **({'shop_id': shop_id} if shop_id else {})), 'amount')
+            sums_de = get_daily_sums(DailyExpense.objects.filter(status='paid', **({'shop_id': shop_id} if shop_id else {})), 'total_amount')
+            sums_et = get_daily_sums(EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance'], **({'shop_id': shop_id} if shop_id else {})), 'amount')
+            
+            sums_sh = dict(StockHistory.objects.filter(created_at__date__gte=seven_days_ago_date, **({'shop_id': shop_id} if shop_id else {}))
+                           .values('created_at__date')
+                           .annotate(total=Sum(F('quantity_added') * F('product__price'), output_field=DecimalField()))
+                           .values_list('created_at__date', 'total'))
+
+            sums_inv_sell = get_daily_sums(Invoice.objects.filter(type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})), 'total')
+            sums_pay_sell = get_daily_sums(Payment.objects.filter(invoice__type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})), 'amount')
+            seven_days_ago_date = today_start.date() - timedelta(days=7)
+
+            sales_history, expenses_history, balance_history, stock_history_values, due_history = [], [], [], [], []
 
             for i in range(7):
                 target_date = today_start.date() - timedelta(days=i)
                 
-                # 1. Sales (Cash In) & Expenses (Cash Out) History
-                day_received = float(payments_in.filter(date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
-                day_received += float(add_money.filter(date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
-                
-                day_paid = float(payments_out.filter(date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
-                day_paid += float(daily_exp.filter(date=target_date).aggregate(s=Sum('total_amount'))['s'] or 0)
-                day_paid += float(emp_trans.filter(date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                day_received = float(sums_p_in.get(target_date, 0) or 0) + float(sums_am.get(target_date, 0) or 0)
+                day_paid = float(sums_p_out.get(target_date, 0) or 0) + float(sums_de.get(target_date, 0) or 0) + float(sums_et.get(target_date, 0) or 0)
 
                 sales_history.append(day_received)
                 expenses_history.append(day_paid)
                 
-                # 2. Balance History (Calculate backwards)
                 balance_history.append(running_balance)
                 running_balance -= (day_received - day_paid)
                 
-                # 3. Stock Value History
                 stock_history_values.append(running_stock_val)
-                day_stock_change_val = float(StockHistory.objects.filter(created_at__date=target_date).aggregate(v=Sum(F('quantity_added') * F('product__price'), output_field=DecimalField()))['v'] or 0)
+                day_stock_change_val = float(sums_sh.get(target_date, 0) or 0)
                 running_stock_val -= day_stock_change_val
                 
-                # 4. Due History
                 due_history.append(running_due)
-                day_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange'], date=target_date).aggregate(s=Sum('total'))['s'] or 0)
-                day_sell_payment = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange'], date=target_date).aggregate(s=Sum('amount'))['s'] or 0)
+                day_sell_amount = float(sums_inv_sell.get(target_date, 0) or 0)
+                day_sell_payment = float(sums_pay_sell.get(target_date, 0) or 0)
                 running_due -= (day_sell_amount - day_sell_payment)
             
             sales_history.reverse()
@@ -199,8 +227,8 @@ class UnifiedAPIView(APIView):
             due_history.reverse()
 
             # Recents
-            recent_employees = EmployeeSerializer(Employee.objects.select_related().order_by('-created_at')[:5], many=True, context={'request': request}).data
-            recent_inv_qs = Invoice.objects.select_related('contact').prefetch_related('items__product', 'payments').order_by('-created_at')[:5]
+            recent_employees = EmployeeSerializer(Employee.objects.filter(**({'shop_id': shop_id} if shop_id else {})).order_by('-created_at')[:5], many=True, context={'request': request}).data
+            recent_inv_qs = Invoice.objects.filter(**({'shop_id': shop_id} if shop_id else {})).select_related('contact').prefetch_related('items__product', 'payments').order_by('-created_at')[:5]
             recent_invoices = InvoiceSerializer(recent_inv_qs, many=True, context={'request': request}).data
 
             return Response({
@@ -226,12 +254,13 @@ class UnifiedAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
         # ========================================================
-        # 🌟 SPECIAL: CASHBOOK LOGS (Full History)
+        # 🌟 SPECIAL: CASHBOOK LOGS (Safety Limit Added)
         # ========================================================
         if action == 'cashbook_logs':
-            # Full Inflow (Payments In + Add Money)
-            all_p_in = Payment.objects.filter(type='in').select_related('contact').order_by('-date', '-created_at')
-            all_am = AddMoney.objects.all().order_by('-date', '-created_at')
+            limit = 1000 # Added to prevent server memory crashes
+            
+            all_p_in = Payment.objects.filter(type='in', **({'shop_id': shop_id} if shop_id else {})).select_related('contact').order_by('-date', '-created_at')[:limit]
+            all_am = AddMoney.objects.filter(**({'shop_id': shop_id} if shop_id else {})).order_by('-date', '-created_at')[:limit]
             
             full_inflow = []
             for p in all_p_in:
@@ -255,15 +284,14 @@ class UnifiedAPIView(APIView):
                     'label': 'Add Money'
                 })
             full_inflow.sort(key=lambda x: x['date'] or '', reverse=True)
+            full_inflow = full_inflow[:limit]
 
-            # Full Outflow (Payments Out + Daily Expenses + Employee Transactions)
-            all_p_out = Payment.objects.filter(type='out').select_related('contact').order_by('-date', '-created_at')
-            all_de = DailyExpense.objects.all().order_by('-date', '-created_at')
-            all_et = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance']).select_related('employee').order_by('-date', '-created_at')
+            all_p_out = Payment.objects.filter(type='out', **({'shop_id': shop_id} if shop_id else {})).select_related('contact', 'invoice').order_by('-date', '-created_at')[:limit]
+            all_de = DailyExpense.objects.filter(**({'shop_id': shop_id} if shop_id else {})).order_by('-date', '-created_at')[:limit]
+            all_et = EmployeeTransaction.objects.filter(type__in=['salary', 'advance', 'bonus', 'allowance', 'overtime', 'overtime_allowance'], **({'shop_id': shop_id} if shop_id else {})).select_related('employee').order_by('-date', '-created_at')[:limit]
             
             full_outflow = []
             for p in all_p_out:
-                # Determine label based on invoice type
                 label = 'Payment'
                 if p.invoice:
                     if p.invoice.type == 'exchange':
@@ -300,6 +328,7 @@ class UnifiedAPIView(APIView):
                     'label': str(e.type).replace('_', ' ').title()
                 })
             full_outflow.sort(key=lambda x: x['date'] or '', reverse=True)
+            full_outflow = full_outflow[:limit]
 
             return Response({
                 'unified_inflow': full_inflow,
@@ -319,13 +348,20 @@ class UnifiedAPIView(APIView):
 
             ModelClass, SerializerClass = MODEL_REGISTRY[model_name]
 
-            # 1. LIST
+            # 1. LIST (N+1 Query Optimized)
             if action == 'list':
                 queryset = ModelClass.objects.all()
+                
+                # Apply Dynamic Select & Prefetch Related
+                if model_name in SELECT_RELATED_MAP:
+                    queryset = queryset.select_related(*SELECT_RELATED_MAP[model_name])
+                if model_name in PREFETCH_RELATED_MAP:
+                    queryset = queryset.prefetch_related(*PREFETCH_RELATED_MAP[model_name])
                 
                 if isinstance(data, dict) and data:
                     ordering = data.pop('ordering', None)
                     search = data.pop('search', None) 
+                    limit = data.pop('limit', None)
                     
                     if data:
                         queryset = queryset.filter(**data)
@@ -335,6 +371,14 @@ class UnifiedAPIView(APIView):
                             queryset = queryset.order_by(*ordering)
                         else:
                             queryset = queryset.order_by(ordering)
+                            
+                    if limit:
+                        try:
+                            limit_val = int(limit)
+                            if limit_val > 0:
+                                queryset = queryset[:limit_val]
+                        except ValueError:
+                            pass
 
                 serializer = SerializerClass(queryset, many=True, context={'request': request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
@@ -422,6 +466,41 @@ class UnifiedAPIView(APIView):
                         'balance': float(r['balance'])
                     })
                 return Response(clean_results)
+
+            # 8. SPECIAL: CONTACT DUE BALANCE
+            elif action == 'due' and model_name == 'contact':
+                if not obj_id:
+                    return Response({'error': 'Missing "id" for contact due.'}, status=status.HTTP_400_BAD_REQUEST)
+                
+                contact_type = data.get('type', 'customer')
+                
+                # We calculate due strictly using DB aggregates to prevent memory overload
+                if contact_type == 'customer' or contact_type == 'in':
+                    total_sell_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='sell').aggregate(s=Sum('due_amount'))['s'] or 0)
+                    
+                    ret_1 = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='return').aggregate(s=Sum('total'))['s'] or 0)
+                    ret_2 = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='exchange', total__lt=0).aggregate(s=Sum('total'))['s'] or 0)
+                    total_return_credit = abs(ret_1) + abs(ret_2)
+                    
+                    exchange_invoice_ids = list(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='exchange', total__lt=0).values_list('id', flat=True))
+                    cash_refunds = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice_id__in=exchange_invoice_ids).aggregate(s=Sum('amount'))['s'] or 0)
+                    
+                    standalone_in = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='in', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
+                    standalone_out = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
+                    
+                    due = total_sell_due - total_return_credit - cash_refunds - (standalone_in - standalone_out)
+                    
+                else: # supplier or out
+                    total_buy_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='buy').aggregate(s=Sum('due_amount'))['s'] or 0)
+                    total_return_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='return').aggregate(s=Sum('due_amount'))['s'] or 0)
+                    
+                    standalone_in = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='in', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
+                    standalone_out = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
+                    
+                    due = (total_buy_due - total_return_due) - (standalone_out - standalone_in)
+
+                due = round(max(0, due), 2)
+                return Response({'due': due}, status=status.HTTP_200_OK)
 
             else:
                 return Response({'error': f'Action "{action}" not supported.'}, status=status.HTTP_400_BAD_REQUEST)
