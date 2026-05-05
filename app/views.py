@@ -427,9 +427,18 @@ class UnifiedAPIView(APIView):
             elif action == 'delete':
                 if not obj_id:
                     return Response({'error': 'Missing "id" for delete action.'}, status=status.HTTP_400_BAD_REQUEST)
-                obj = get_object_or_404(ModelClass, id=obj_id)
-                obj.delete()
-                return Response({'message': 'Deleted successfully.'}, status=status.HTTP_204_NO_CONTENT)
+                
+                # Ensure obj_id is a clean string (prevents some UUID lookup issues)
+                clean_id = str(obj_id).strip()
+                
+                try:
+                    obj = ModelClass.objects.get(id=clean_id)
+                    obj.delete()
+                    return Response({'message': f'{model_name.capitalize()} deleted successfully.'}, status=status.HTTP_200_OK)
+                except ModelClass.DoesNotExist:
+                    return Response({'error': f'No {model_name} found with ID: {clean_id}'}, status=status.HTTP_404_NOT_FOUND)
+                except Exception as e:
+                    return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             # 6. BULK DELETE
             elif action == 'bulk_delete':
@@ -471,35 +480,60 @@ class UnifiedAPIView(APIView):
             elif action == 'due' and model_name == 'contact':
                 if not obj_id:
                     return Response({'error': 'Missing "id" for contact due.'}, status=status.HTTP_400_BAD_REQUEST)
-                
-                contact_type = data.get('type', 'customer')
-                
-                # We calculate due strictly using DB aggregates to prevent memory overload
-                if contact_type == 'customer' or contact_type == 'in':
-                    total_sell_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='sell').aggregate(s=Sum('due_amount'))['s'] or 0)
-                    
-                    ret_1 = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='return').aggregate(s=Sum('total'))['s'] or 0)
-                    ret_2 = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='exchange', total__lt=0).aggregate(s=Sum('total'))['s'] or 0)
-                    total_return_credit = abs(ret_1) + abs(ret_2)
-                    
-                    exchange_invoice_ids = list(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='exchange', total__lt=0).values_list('id', flat=True))
-                    cash_refunds = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice_id__in=exchange_invoice_ids).aggregate(s=Sum('amount'))['s'] or 0)
-                    
-                    standalone_in = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='in', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
-                    standalone_out = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
-                    
-                    due = total_sell_due - total_return_credit - cash_refunds - (standalone_in - standalone_out)
-                    
-                else: # supplier or out
-                    total_buy_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='buy').aggregate(s=Sum('due_amount'))['s'] or 0)
-                    total_return_due = float(Invoice.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='return').aggregate(s=Sum('due_amount'))['s'] or 0)
-                    
-                    standalone_in = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='in', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
-                    standalone_out = float(Payment.objects.filter(contact_id=obj_id, **({'shop_id': shop_id} if shop_id else {}), type='out', invoice__isnull=True).aggregate(s=Sum('amount'))['s'] or 0)
-                    
-                    due = (total_buy_due - total_return_due) - (standalone_out - standalone_in)
 
-                due = round(max(0, due), 2)
+                # 'data' is the nested sub-object from frontend: { type: 'customer' | 'supplier' }
+                contact_type = data.get('type', 'customer') if isinstance(data, dict) else 'customer'
+                shop_filter = {'shop_id': shop_id} if shop_id else {}
+
+                if contact_type == 'customer' or contact_type == 'in':
+                    # All money owed by customer = total of sell + exchange invoices
+                    total_invoiced = float(Invoice.objects.filter(
+                        contact_id=obj_id, type__in=['sell', 'exchange'], **shop_filter
+                    ).aggregate(s=Sum('total'))['s'] or 0)
+
+                    # Credit customer for returns
+                    total_returned = float(Invoice.objects.filter(
+                        contact_id=obj_id, type='return', **shop_filter
+                    ).aggregate(s=Sum('total'))['s'] or 0)
+
+                    # All payments received from this customer
+                    total_received = float(Payment.objects.filter(
+                        contact_id=obj_id, type='in', **shop_filter
+                    ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                    # All refunds given back to customer
+                    total_refunded = float(Payment.objects.filter(
+                        contact_id=obj_id, type='out', **shop_filter
+                    ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                    # Net Due = (What they owe us - Returns) - (What they paid - Refunds given)
+                    due = (total_invoiced - total_returned) - (total_received - total_refunded)
+
+                else:  # supplier or out
+                    # All money we owe supplier = total of buy invoices
+                    total_purchased = float(Invoice.objects.filter(
+                        contact_id=obj_id, type='buy', **shop_filter
+                    ).aggregate(s=Sum('total'))['s'] or 0)
+
+                    # Credit for buy returns
+                    total_buy_returns = float(Invoice.objects.filter(
+                        contact_id=obj_id, type='return', **shop_filter
+                    ).aggregate(s=Sum('total'))['s'] or 0)
+
+                    # All payments we made to supplier
+                    total_paid_out = float(Payment.objects.filter(
+                        contact_id=obj_id, type='out', **shop_filter
+                    ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                    # Any money received back from supplier
+                    total_received_back = float(Payment.objects.filter(
+                        contact_id=obj_id, type='in', **shop_filter
+                    ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                    # Net Due = (What we owe - Returns) - (What we already paid - Received back)
+                    due = (total_purchased - total_buy_returns) - (total_paid_out - total_received_back)
+
+                due = round(due, 2)
                 return Response({'due': due}, status=status.HTTP_200_OK)
 
             else:
