@@ -54,10 +54,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -145,6 +145,15 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 # CORS Config
 CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+
+# HTTPS & Proxy Settings
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# File Upload Settings
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
 
 # Django REST Framework Config
 REST_FRAMEWORK = {

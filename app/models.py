@@ -37,12 +37,12 @@ class Employee(models.Model):
     gender = models.CharField(max_length=50, null=True, blank=True)
     marriage_status = models.CharField(max_length=50, null=True, blank=True)
     department = models.CharField(max_length=255, null=True, blank=True)
-    status = models.CharField(max_length=50, default='Active')
-    salary_period = models.CharField(max_length=50, default='Monthly')
-    employment_type = models.CharField(max_length=50, default='Full-time') # Full-time, Part-time, Contract, etc.
+    status = models.CharField(max_length=50, default='Active', null=True, blank=True)
+    salary_period = models.CharField(max_length=50, default='Monthly', null=True, blank=True)
+    employment_type = models.CharField(max_length=50, default='Full-time', null=True, blank=True) # Full-time, Part-time, Contract, etc.
     permanent_address = models.JSONField(default=dict, blank=True)
     local_address = models.JSONField(default=dict, blank=True)
-    same_as_local = models.BooleanField(default=False)
+    same_as_local = models.BooleanField(default=False, null=True, blank=True)
     emergency_contact = models.JSONField(default=dict, blank=True)
     notes = models.TextField(null=True, blank=True)
     

@@ -1,3 +1,5 @@
+import os
+from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -74,7 +76,6 @@ class UnifiedAPIView(APIView):
         obj_id = request.data.get('id')
         data = request.data.get('data', {})
         role = request.data.get('role', 'member')
-
 
         shop_id = request.data.get('shop_id')
         if shop_id and model_name != 'shop':
@@ -548,11 +549,22 @@ class FileUploadView(APIView):
     Endpoint for uploading images/files to local media storage.
     """
     def post(self, request, *args, **kwargs):
-        file = request.FILES.get('file')
-        if not file:
-            return Response({'error': 'No file provided in the request.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        file_name = default_storage.save(file.name, ContentFile(file.read()))
-        file_url = request.build_absolute_uri(f'/media/{file_name}')
-        
-        return Response({'url': file_url}, status=status.HTTP_201_CREATED)
+        try:
+            file = request.FILES.get('file')
+            if not file:
+                return Response({'error': 'No file provided in the request.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Ensure media directory exists
+            if not os.path.exists(settings.MEDIA_ROOT):
+                os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
+                
+            file_name = default_storage.save(file.name, ContentFile(file.read()))
+            
+            # Generate absolute URL - prioritize HTTPS if configured
+            file_url = request.build_absolute_uri(f'/media/{file_name}')
+            if 'https' not in file_url and request.is_secure():
+                 file_url = file_url.replace('http://', 'https://')
+            
+            return Response({'url': file_url}, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
