@@ -30,6 +30,22 @@ class Employee(models.Model):
     daily_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     monthly_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     is_authorizer = models.BooleanField(default=False)
+    
+    # New Extended Fields
+    father_name = models.CharField(max_length=255, null=True, blank=True)
+    mother_name = models.CharField(max_length=255, null=True, blank=True)
+    gender = models.CharField(max_length=50, null=True, blank=True)
+    marriage_status = models.CharField(max_length=50, null=True, blank=True)
+    department = models.CharField(max_length=255, null=True, blank=True)
+    status = models.CharField(max_length=50, default='Active')
+    salary_period = models.CharField(max_length=50, default='Monthly')
+    employment_type = models.CharField(max_length=50, default='Full-time') # Full-time, Part-time, Contract, etc.
+    permanent_address = models.JSONField(default=dict, blank=True)
+    local_address = models.JSONField(default=dict, blank=True)
+    same_as_local = models.BooleanField(default=False)
+    emergency_contact = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(null=True, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
@@ -41,6 +57,8 @@ class Attendance(models.Model):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='attendances')
     date = models.DateField(db_index=True)
     status = models.CharField(max_length=20, default='present') # 'present', 'absent', 'half'
+    ot_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    note = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:

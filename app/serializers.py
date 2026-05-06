@@ -15,10 +15,12 @@ class AttendanceSerializer(serializers.ModelSerializer):
         employee = validated_data.get('employee')
         date = validated_data.get('date')
         status = validated_data.get('status', 'present')
+        ot_amount = validated_data.get('ot_amount', 0)
+        note = validated_data.get('note', '')
         attendance, created = Attendance.objects.update_or_create(
             employee=employee,
             date=date,
-            defaults={'status': status}
+            defaults={'status': status, 'ot_amount': ot_amount, 'note': note}
         )
         return attendance
 
