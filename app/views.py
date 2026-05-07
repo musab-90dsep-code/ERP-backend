@@ -84,6 +84,19 @@ class UnifiedAPIView(APIView):
             elif data is None:
                 data = {'shop': shop_id}
 
+        # ─── Data Cleaning: Handle empty strings for Date/JSON fields ───
+        if isinstance(data, dict):
+            date_fields = ['dob', 'date', 'issue_date', 'cash_date', 'alert_date', 'transfer_date', 'payment_date']
+            for field in date_fields:
+                if field in data and data[field] == '':
+                    data[field] = None
+            
+            # Optional: handle empty strings for numeric fields if needed
+            numeric_fields = ['salary', 'daily_allowance', 'monthly_allowance', 'amount', 'total', 'subtotal', 'discount', 'paid_amount', 'due_amount']
+            for field in numeric_fields:
+                if field in data and data[field] == '':
+                    data[field] = 0
+
         if not action:
             return Response({'error': 'Missing "action" in request payload.'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -450,31 +463,77 @@ class UnifiedAPIView(APIView):
                     return Response({"deleted": count}, status=status.HTTP_200_OK)
                 return Response({"error": "No filters provided for bulk delete"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 7. SPECIAL: PROCESSING BALANCES
+            # 7. SPECIAL: PROCESSING BALANCES (Optimized & Matched to Frontend)
             elif action == 'balances' and model_name == 'processing_order':
-                results = ProcessingOrder.objects.values(
+                shop_filter = {'shop_id': shop_id} if shop_id else {}
+                
+                # Step 1: Get all processors
+                processors = Contact.objects.filter(type='processor', **shop_filter)
+                processor_map = {str(p.id): {
+                    'processor': str(p.id),
+                    'processor_name': p.name or p.shop_name or 'Unknown Processor',
+                    'processor_shop': p.shop_name,
+                    'has_data': False,
+                    'rows': []
+                } for p in processors}
+
+                # Step 2: Get aggregated data
+                results = ProcessingOrder.objects.filter(**shop_filter).values(
+                    'processor__id',
                     'processor__name', 
                     'processor__shop_name', 
                     'product__name',
-                    'product__unit'
+                    'product__unit',
+                    'product__processing_price'
                 ).annotate(
-                    issued=Sum(Case(When(type='issued', then=F('quantity')), default=Value(0), output_field=DecimalField())),
-                    received=Sum(Case(When(type='received', then=F('quantity')), default=Value(0), output_field=DecimalField())),
+                    total_issued_quantity=Sum(Case(When(type='issued', then=F('quantity')), default=Value(0), output_field=DecimalField())),
+                    total_received_quantity=Sum(Case(When(type='received', then=F('quantity')), default=Value(0), output_field=DecimalField())),
+                    total_issued_value=Sum(Case(When(type='issued', then=F('quantity') * F('product__processing_price')), default=Value(0), output_field=DecimalField())),
+                    total_received_value=Sum(Case(When(type='received', then=F('quantity') * F('product__processing_price')), default=Value(0), output_field=DecimalField())),
                 ).annotate(
-                    balance=F('issued') - F('received')
+                    total_outstanding_quantity=F('total_issued_quantity') - F('total_received_quantity'),
+                    total_outstanding_value=F('total_issued_value') - F('total_received_value')
                 ).order_by('processor__name')
-                
-                clean_results = []
+
+                # Step 3: Merge data
                 for r in results:
-                    clean_results.append({
-                        'processor_name': r['processor__name'],
-                        'processor_shop': r['processor__shop_name'],
-                        'product_name': r['product__name'],
-                        'unit': r['product__unit'],
-                        'issued': float(r['issued']),
-                        'received': float(r['received']),
-                        'balance': float(r['balance'])
-                    })
+                    pid = str(r['processor__id'])
+                    if pid in processor_map:
+                        processor_map[pid]['has_data'] = True
+                        processor_map[pid]['rows'].append({
+                            'processor': pid,
+                            'processor_name': r['processor__name'] or r['processor__shop_name'] or 'Unknown Processor',
+                            'processor_shop': r['processor__shop_name'],
+                            'product_name': r['product__name'],
+                            'unit': r['product__unit'],
+                            'total_issued_quantity': float(r['total_issued_quantity'] or 0),
+                            'total_issued_value': float(r['total_issued_value'] or 0),
+                            'total_received_quantity': float(r['total_received_quantity'] or 0),
+                            'total_received_value': float(r['total_received_value'] or 0),
+                            'total_outstanding_quantity': float(r['total_outstanding_quantity'] or 0),
+                            'total_outstanding_value': float(r['total_outstanding_value'] or 0)
+                        })
+
+                clean_results = []
+                for pid, pdata in processor_map.items():
+                    if pdata['has_data']:
+                        clean_results.extend(pdata['rows'])
+                    else:
+                        # Add a default row for processors with no orders
+                        clean_results.append({
+                            'processor': pid,
+                            'processor_name': pdata['processor_name'],
+                            'processor_shop': pdata['processor_shop'],
+                            'product_name': 'No Items',
+                            'unit': '-',
+                            'total_issued_quantity': 0,
+                            'total_issued_value': 0,
+                            'total_received_quantity': 0,
+                            'total_received_value': 0,
+                            'total_outstanding_quantity': 0,
+                            'total_outstanding_value': 0
+                        })
+
                 return Response(clean_results)
 
             # 8. SPECIAL: CONTACT DUE BALANCE
