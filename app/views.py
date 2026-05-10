@@ -1,14 +1,55 @@
-import os
-from django.conf import settings
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.shortcuts import get_object_or_404
+import os
+from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.db.models import F, Sum, DecimalField, Case, When, Value
 from django.utils import timezone
 from datetime import timedelta
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+
+@method_decorator(csrf_exempt, name='dispatch')
+class LoginView(APIView):
+    def post(self, request):
+        login_input = request.data.get('email', '').strip() 
+        password = request.data.get('password', '').strip()
+        
+        print(f"Login attempt: {login_input}") # DEBUG
+        
+        # Try finding user by email first (case-insensitive)
+        user_obj = User.objects.filter(email__iexact=login_input).first()
+        if user_obj:
+            username = user_obj.username
+        else:
+            username = login_input
+            
+        print(f"Authenticating username: {username}") # DEBUG
+        user = authenticate(username=username, password=password)
+        print(f"Auth result: {user}") # DEBUG
+        
+        if user is not None:
+            role = 'member'
+            if hasattr(user, 'profile'):
+                role = user.profile.role
+            elif user.is_superuser:
+                role = 'admin'
+            
+            return Response({
+                'token': 'real-token-for-' + user.username,
+                'user': {
+                    'id': str(user.id),
+                    'email': user.email,
+                    'username': user.username,
+                    'role': role
+                }
+            }, status=status.HTTP_200_OK)
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
 
 # Import Models
 from app.models import (
@@ -65,6 +106,7 @@ PREFETCH_RELATED_MAP = {
     'invoice': ['items', 'payments', 'items__product']
 }
 
+@method_decorator(csrf_exempt, name='dispatch')
 class UnifiedAPIView(APIView):
     """
     A single API endpoint to handle all operations for all models. (Optimized)
@@ -78,6 +120,15 @@ class UnifiedAPIView(APIView):
         role = request.data.get('role', 'member')
 
         shop_id = request.data.get('shop_id')
+        
+        # ─── Shop ID Validation ───
+        if shop_id:
+            try:
+                import uuid
+                uuid.UUID(str(shop_id))
+            except ValueError:
+                shop_id = None # Ignore invalid UUIDs
+        
         if shop_id and model_name != 'shop':
             if isinstance(data, dict):
                 data['shop'] = shop_id
@@ -407,6 +458,13 @@ class UnifiedAPIView(APIView):
 
             # 3. CREATE
             elif action == 'create':
+                # --- Shop Limit Protection ---
+                if model_name == 'shop':
+                    if Shop.objects.count() >= 3:
+                        return Response({
+                            'error': 'Shop limit reached. You can only create a maximum of 3 shops.'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
                 if model_name == 'attendance':
                     emp_id = data.get('employee')
                     att_date = data.get('date')
@@ -603,6 +661,7 @@ class UnifiedAPIView(APIView):
             return Response({'error': str(e), 'trace': traceback.format_exc()}, status=500)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class FileUploadView(APIView):
     """
     Endpoint for uploading images/files to local media storage.

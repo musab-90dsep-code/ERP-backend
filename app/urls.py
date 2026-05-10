@@ -2,11 +2,14 @@ from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
 # FileUploadView যদি views.py তে লিখে থাকেন তবে সেটিও ইম্পোর্ট করুন
-from app.views import UnifiedAPIView, FileUploadView 
+from app.views import UnifiedAPIView, FileUploadView, LoginView 
 
 urlpatterns = [
     # আপনার মেইন ইউনিফাইড এন্ডপয়েন্ট
     path('api/', UnifiedAPIView.as_view(), name='unified_api'),
+    
+    # লগইন এন্ডপয়েন্ট
+    path('api/login/', LoginView.as_view(), name='login'),
     
     # ইমেজ/ফাইল আপলোডের জন্য এন্ডপয়েন্ট (যা আমরা আগে আলোচনা করেছি)
     path('api/upload/', FileUploadView.as_view(), name='file_upload'),
