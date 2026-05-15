@@ -4,6 +4,8 @@ from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.authentication import TokenAuthentication
+from rest_framework.authtoken.models import Token
 import os
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -34,19 +36,32 @@ class LoginView(APIView):
         print(f"Auth result: {user}") # DEBUG
         
         if user is not None:
-            role = 'member'
             if hasattr(user, 'profile'):
                 role = user.profile.role
             elif user.is_superuser:
                 role = 'admin'
+            else:
+                role = 'member'
             
+            # Generate or get real DRF token
+            token, _ = Token.objects.get_or_create(user=user)
+            
+            permissions = {}
+            if hasattr(user, 'profile'):
+                permissions = user.profile.permissions or {}
+            elif user.is_superuser:
+                # Superusers don't have explicit profile perms usually, or have all. 
+                # We can send a flag or empty dict. Backend check handles is_superuser.
+                permissions = {"all": True}
+
             return Response({
-                'token': 'real-token-for-' + user.username,
+                'token': token.key,
                 'user': {
                     'id': str(user.id),
                     'email': user.email,
                     'username': user.username,
-                    'role': role
+                    'role': role,
+                    'permissions': permissions
                 }
             }, status=status.HTTP_200_OK)
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -111,7 +126,7 @@ class UnifiedAPIView(APIView):
     """
     A single API endpoint to handle all operations for all models. (Optimized)
     """
-    
+    authentication_classes = [TokenAuthentication]
     def post(self, request, *args, **kwargs):
         action = request.data.get('action')
         model_name = request.data.get('model')
@@ -152,18 +167,87 @@ class UnifiedAPIView(APIView):
             return Response({'error': 'Missing "action" in request payload.'}, status=status.HTTP_400_BAD_REQUEST)
         
         # ========================================================
-        # 🛡️ SECURITY: ROLE-BASED ACCESS CONTROL
+        # 🛡️ SECURITY: SERVER-SIDE PERMISSION CHECK
         # ========================================================
         if action in ['create', 'update', 'delete', 'bulk_delete']:
-            if role == 'member':
-                return Response({'error': 'Members are restricted to view and download only.'}, status=status.HTTP_403_FORBIDDEN)
-            
-            if role == 'manager':
-                if model_name == 'employee':
-                    return Response({'error': 'Managers cannot manage employee records.'}, status=status.HTTP_403_FORBIDDEN)
-                
-                if action in ['delete', 'bulk_delete'] and model_name in ['invoice', 'payment']:
-                    return Response({'error': 'Managers cannot delete invoices or transactions.'}, status=status.HTTP_403_FORBIDDEN)
+            db_user = request.user
+            token_was_sent = False
+
+            print(f"[PERM DEBUG] action={action}, model={model_name}, drf_user={db_user}, is_auth={getattr(db_user, 'is_authenticated', False)}")
+
+            # If DRF didn't authenticate, manually parse token from header
+            if not db_user or not db_user.is_authenticated:
+                auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+                print(f"[PERM DEBUG] Auth header: {auth_header[:50] if auth_header else 'NONE'}")
+                # Handle both 'Token xxx' and 'Bearer xxx' formats
+                if auth_header.startswith('Token ') or auth_header.startswith('Bearer '):
+                    token_was_sent = True
+                    raw_token = auth_header.split(' ', 1)[1].strip()
+                    try:
+                        from rest_framework.authtoken.models import Token as AuthToken
+                        token_obj = AuthToken.objects.select_related('user').get(key=raw_token)
+                        db_user = token_obj.user
+                        print(f"[PERM DEBUG] Manual token resolved user: {db_user}")
+                    except Exception as e:
+                        db_user = None
+                        print(f"[PERM DEBUG] Token lookup failed: {e}")
+
+            # If a token was sent but is INVALID -> force re-login
+            if token_was_sent and (not db_user or not db_user.is_authenticated):
+                return Response(
+                    {'error': 'Invalid or expired token. Please sign out and log in again.'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+            # Perform permission check with identified user
+            if db_user and db_user.is_authenticated:
+                print(f"[PERM DEBUG] User identified: {db_user.username}, superuser={db_user.is_superuser}")
+                if db_user.is_superuser:
+                    print("[PERM DEBUG] Superuser - full access granted")
+                elif hasattr(db_user, 'profile'):
+                    profile = db_user.profile
+                    db_role = profile.role
+                    db_permissions = profile.permissions or {}
+                    print(f"[PERM DEBUG] Role={db_role}, Permissions={db_permissions}")
+
+                    if db_role == 'admin':
+                        print("[PERM DEBUG] Admin role - full access")
+                    elif db_role == 'member':
+                        return Response(
+                            {'error': 'Permission Denied: Members can only view data.'},
+                            status=status.HTTP_403_FORBIDDEN
+                        )
+                    elif db_role == 'manager':
+                        model_to_module = {
+                            'product': 'inventory', 'stock_history': 'inventory',
+                            'invoice': 'sales', 'payment': 'sales', 'contact': 'sales',
+                            'employee': 'employees', 
+                            'attendance': 'attendance_payroll', 
+                            'employee_transaction': 'attendance_payroll',
+                            'processing_order': 'processing', 'order': 'processing',
+                            'daily_expense': 'expenses',
+                            'add_money': 'finance', 'internal_account': 'finance',
+                            'shop': 'settings',
+                        }
+                        module = model_to_module.get(model_name or '')
+                        print(f"[PERM DEBUG] module={module}, module_perms={db_permissions.get(module, [])}")
+                        if module:
+                            module_perms = db_permissions.get(module, [])
+                            action_to_perm = {
+                                'create': 'add',
+                                'update': 'edit',
+                                'bulk_delete': 'delete',
+                                'delete': 'delete',
+                            }
+                            required_perm = action_to_perm.get(action)
+                            print(f"[PERM DEBUG] required_perm={required_perm}, has_perm={'YES' if required_perm in module_perms else 'NO'}")
+                            if required_perm and required_perm not in module_perms:
+                                return Response(
+                                    {'error': f'Permission Denied: You do not have "{required_perm}" permission for {module}.'},
+                                    status=status.HTTP_403_FORBIDDEN
+                                )
+            else:
+                print("[PERM DEBUG] No authenticated user found - skipping permission check")
 
         # ========================================================
         # 🌟 SPECIAL: DASHBOARD STATS (Optimized Queries)
