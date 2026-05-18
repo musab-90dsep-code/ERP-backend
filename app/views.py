@@ -152,16 +152,16 @@ class UnifiedAPIView(APIView):
 
         # ─── Data Cleaning: Handle empty strings for Date/JSON fields ───
         if isinstance(data, dict):
-            date_fields = ['dob', 'date', 'issue_date', 'cash_date', 'alert_date', 'transfer_date', 'payment_date']
+            date_fields = ['dob', 'date', 'issue_date', 'cash_date', 'alert_date', 'transfer_date', 'payment_date', 'customer_since']
             for field in date_fields:
                 if field in data and data[field] == '':
                     data[field] = None
-            
-            # Optional: handle empty strings for numeric fields if needed
-            numeric_fields = ['salary', 'daily_allowance', 'monthly_allowance', 'amount', 'total', 'subtotal', 'discount', 'paid_amount', 'due_amount']
+
+            # Handle empty strings for numeric fields
+            numeric_fields = ['salary', 'daily_allowance', 'monthly_allowance', 'amount', 'total', 'subtotal', 'discount', 'paid_amount', 'due_amount', 'opening_balance', 'credit_limit', 'discount_percent']
             for field in numeric_fields:
                 if field in data and data[field] == '':
-                    data[field] = 0
+                    data[field] = None
 
         if not action:
             return Response({'error': 'Missing "action" in request payload.'}, status=status.HTTP_400_BAD_REQUEST)

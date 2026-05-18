@@ -96,13 +96,38 @@ class Contact(models.Model):
     customer_code = models.CharField(max_length=100, null=True, blank=True)
     name = models.CharField(max_length=255)
     shop_name = models.CharField(max_length=255, null=True, blank=True)
+    customer_type = models.CharField(max_length=50, default='Retail', null=True, blank=True) # 'Retail', 'Wholesale', 'VIP'
     phone = models.CharField(max_length=50, null=True, blank=True)
     whatsapp = models.CharField(max_length=50, null=True, blank=True)
     phone_numbers = models.JSONField(default=list, blank=True)
     email = models.EmailField(null=True, blank=True)
-    address = models.TextField(null=True, blank=True)
+    website = models.URLField(max_length=500, null=True, blank=True)
+
+    # Address fields
+    country = models.CharField(max_length=100, default='Bangladesh', null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True) # District
+    thana = models.CharField(max_length=100, null=True, blank=True)
+    postal_code = models.CharField(max_length=20, null=True, blank=True)
+    address = models.TextField(null=True, blank=True) # Area (Street/House/Road)
+    address_line_2 = models.TextField(null=True, blank=True)
+
+    # ID / Legal
+    id_type = models.CharField(max_length=100, default='National ID', null=True, blank=True)
+    id_number = models.CharField(max_length=255, null=True, blank=True)
+    tin_number = models.CharField(max_length=255, null=True, blank=True)
+
+    # Financial
+    opening_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0, null=True, blank=True)
+    credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0, null=True, blank=True)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0, null=True, blank=True)
+    customer_since = models.DateField(null=True, blank=True)
+
+    # Other
+    notes = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=50, default='active', null=True, blank=True) # 'active', 'inactive'
     photo_url = models.URLField(max_length=1000, null=True, blank=True)
-    bank_details = models.JSONField(default=dict, blank=True)
+    bank_details = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
