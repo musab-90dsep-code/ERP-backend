@@ -166,11 +166,69 @@ class Product(models.Model):
     product_heads = models.JSONField(default=list, blank=True)
     variants = models.JSONField(default=list, blank=True)  # [{name: str, price: float}]
     product_quality = models.CharField(max_length=50, null=True, blank=True)
+    notes = models.TextField(null=True, blank=True)
     returned_stock_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
         return self.name
+
+    def update_variant_stock(self, quality, head, quantity_change):
+        """
+        Update a variant's stock by matching the variant name.
+        Variant names are stored as:
+          - "Quality - Head"  (combined)
+          - "Head"            (head only)
+          - "Quality"         (quality only)
+        selected_head from frontend may contain:
+          - Full variant name "Quality - Head"
+          - Just the head part "Head"
+          - Full variant name without quality
+        """
+        if not self.variants:
+            return False
+        q = (quality or "").strip()
+        h = (head or "").strip()
+
+        # Build candidates from most-specific to least-specific
+        candidates = []
+        if q and h:
+            candidates.append(f"{q} - {h}")   # exact combo match
+        if h:
+            candidates.append(h)               # exact head match (or full name)
+        if q:
+            candidates.append(q)               # exact quality match
+
+        # First pass: exact name match
+        for candidate in candidates:
+            for i, v in enumerate(self.variants):
+                name = v.get('name', '')
+                if name and name == candidate:
+                    current_stock = float(v.get('stock') or 0)
+                    self.variants[i]['stock'] = str(round(max(0.0, current_stock + float(quantity_change)), 3))
+                    return True
+
+        # Second pass: if head is given, match variants where name ends with " - {head}"
+        # This handles the case where frontend sends head="Long Body" but DB has "Classic Series - Long Body"
+        if h and q:
+            suffix = f" - {h}"
+            prefix = f"{q} - "
+            for i, v in enumerate(self.variants):
+                name = v.get('name', '')
+                if name and name.endswith(suffix) and name.startswith(prefix):
+                    current_stock = float(v.get('stock') or 0)
+                    self.variants[i]['stock'] = str(round(max(0.0, current_stock + float(quantity_change)), 3))
+                    return True
+        elif h:
+            suffix = f" - {h}"
+            for i, v in enumerate(self.variants):
+                name = v.get('name', '')
+                if name and name.endswith(suffix):
+                    current_stock = float(v.get('stock') or 0)
+                    self.variants[i]['stock'] = str(round(max(0.0, current_stock + float(quantity_change)), 3))
+                    return True
+
+        return False
 
 class Invoice(models.Model):
     shop = models.ForeignKey('Shop', on_delete=models.CASCADE, null=True, blank=True)
@@ -190,6 +248,42 @@ class Invoice(models.Model):
     warehouse = models.CharField(max_length=100, null=True, blank=True)
     notes = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    def delete(self, *args, **kwargs):
+        # Reverse stock change for all items
+        for item in self.items.all():
+            if item.product:
+                product = item.product
+                product.refresh_from_db()
+                stock_before = product.stock_quantity
+                if self.type == 'return' or (self.type == 'exchange' and item.is_return):
+                    # Originally did NOT change stock_quantity, only returned_stock_quantity!
+                    product.returned_stock_quantity = max(0, product.returned_stock_quantity - item.quantity)
+                elif self.type == 'sell' or (self.type == 'exchange' and not item.is_return):
+                    # Originally decreased stock, so now increase/revert it!
+                    product.stock_quantity += item.quantity
+                    product.update_variant_stock(item.quality, item.selected_head, item.quantity)
+                # NOTE: 'buy' invoices never changed stock automatically, so nothing to revert
+                product.save()
+                
+                # Create Stock History for reversion
+                from app.models import StockHistory
+                if self.type == 'return' or (self.type == 'exchange' and item.is_return):
+                    qty_change = 0
+                elif self.type in ['sell', 'exchange'] and not item.is_return:
+                    qty_change = item.quantity
+                else: # buy — no stock was changed, so nothing to revert
+                    qty_change = 0
+                StockHistory.objects.create(
+                    product=product,
+                    item_type=product.category,
+                    item_name=product.name,
+                    quantity_added=qty_change,
+                    stock_before=stock_before,
+                    stock_after=product.stock_quantity,
+                    note=f"Reverted Stock: Deleted Invoice {self.type}: {self.id} {'(Return Part - Reverted Returned Stock)' if item.is_return else ''}"
+                )
+        super().delete(*args, **kwargs)
 
 class InvoiceItem(models.Model):
     shop = models.ForeignKey('Shop', on_delete=models.CASCADE, null=True, blank=True)

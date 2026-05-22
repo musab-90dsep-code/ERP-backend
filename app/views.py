@@ -625,13 +625,12 @@ class UnifiedAPIView(APIView):
                     'processor__name', 
                     'processor__shop_name', 
                     'product__name',
-                    'product__unit',
-                    'product__processing_price'
+                    'product__unit'
                 ).annotate(
                     total_issued_quantity=Sum(Case(When(type='issued', then=F('quantity')), default=Value(0), output_field=DecimalField())),
                     total_received_quantity=Sum(Case(When(type='received', then=F('quantity')), default=Value(0), output_field=DecimalField())),
-                    total_issued_value=Sum(Case(When(type='issued', then=F('quantity') * F('product__processing_price')), default=Value(0), output_field=DecimalField())),
-                    total_received_value=Sum(Case(When(type='received', then=F('quantity') * F('product__processing_price')), default=Value(0), output_field=DecimalField())),
+                    total_issued_value=Sum(Case(When(type='issued', then=F('quantity') * Case(When(process_type='auto', then=F('product__processing_price_auto')), default=F('product__processing_price_manual'), output_field=DecimalField())), default=Value(0), output_field=DecimalField())),
+                    total_received_value=Sum(Case(When(type='received', then=F('quantity') * Case(When(process_type='auto', then=F('product__processing_price_auto')), default=F('product__processing_price_manual'), output_field=DecimalField())), default=Value(0), output_field=DecimalField())),
                 ).annotate(
                     total_outstanding_quantity=F('total_issued_quantity') - F('total_received_quantity'),
                     total_outstanding_value=F('total_issued_value') - F('total_received_value')

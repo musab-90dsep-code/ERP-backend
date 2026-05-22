@@ -95,28 +95,28 @@ class InvoiceSerializer(serializers.ModelSerializer):
             # Stock Update Logic
             if item.product:
                 product = item.product
+                product.refresh_from_db()
                 stock_before = product.stock_quantity
                 
-                # Check if it's an exchange or specific type
-                should_update_returned = False
-                if invoice.type == 'return':
-                    should_update_returned = True
-                elif invoice.type == 'exchange' and item.is_return:
-                    should_update_returned = True
-                
-                if should_update_returned:
+                if invoice.type == 'return' or (invoice.type == 'exchange' and item.is_return):
+                    # Returned products: ONLY go to returned_stock_quantity, NOT normal stock_quantity!
                     product.returned_stock_quantity += item.quantity
-                else:
-                    if invoice.type == 'sell' or invoice.type == 'exchange':
-                        product.stock_quantity -= item.quantity
-                    elif invoice.type == 'buy':
-                        product.stock_quantity += item.quantity
+                elif invoice.type == 'sell' or (invoice.type == 'exchange' and not item.is_return):
+                    # Sold/taken products: go out of stock!
+                    product.stock_quantity -= item.quantity
+                    product.update_variant_stock(item.quality, item.selected_head, -item.quantity)
+                # NOTE: 'buy' invoices do NOT auto-add stock — user adds stock manually
                 
                 product.save()
                 
                 # Create Stock History
                 from app.models import StockHistory
-                qty_change = -item.quantity if (invoice.type in ['sell', 'exchange'] and not item.is_return) else item.quantity
+                if invoice.type == 'return' or (invoice.type == 'exchange' and item.is_return):
+                    qty_change = 0
+                elif invoice.type in ['sell', 'exchange'] and not item.is_return:
+                    qty_change = -item.quantity
+                else:
+                    qty_change = 0  # buy: no auto stock change
                 
                 StockHistory.objects.create(
                     product=product,
@@ -125,10 +125,77 @@ class InvoiceSerializer(serializers.ModelSerializer):
                     quantity_added=qty_change,
                     stock_before=stock_before,
                     stock_after=product.stock_quantity,
-                    note=f"Invoice {invoice.type}: {invoice.id} {'(Return Part)' if item.is_return else ''}"
+                    note=f"Invoice {invoice.type}: {invoice.id} {'(Return Part - Added to Returned Stock)' if item.is_return else ''}"
                 )
                 
         return invoice
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', [])
+        
+        # 1. Reverse stock changes for all ORIGINAL items of this invoice
+        for item in instance.items.all():
+            if item.product:
+                product = item.product
+                product.refresh_from_db()
+                if instance.type == 'return' or (instance.type == 'exchange' and item.is_return):
+                    # Originally did NOT change stock_quantity, only returned_stock_quantity!
+                    product.returned_stock_quantity = max(0, product.returned_stock_quantity - item.quantity)
+                elif instance.type == 'sell' or (instance.type == 'exchange' and not item.is_return):
+                    # Originally decreased stock, so now increase/revert it!
+                    product.stock_quantity += item.quantity
+                    product.update_variant_stock(item.quality, item.selected_head, item.quantity)
+                # NOTE: 'buy' invoices never changed stock, so nothing to revert
+                product.save()
+        
+        # 2. Delete original items
+        instance.items.all().delete()
+        
+        # 3. Update basic fields on instance
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # 4. Create new items and apply their stock changes
+        for item_data in items_data:
+            item = InvoiceItem.objects.create(invoice=instance, **item_data)
+            
+            if item.product:
+                product = item.product
+                product.refresh_from_db()
+                stock_before = product.stock_quantity
+                
+                if instance.type == 'return' or (instance.type == 'exchange' and item.is_return):
+                    # Returned products: ONLY go to returned_stock_quantity, NOT normal stock_quantity!
+                    product.returned_stock_quantity += item.quantity
+                elif instance.type == 'sell' or (instance.type == 'exchange' and not item.is_return):
+                    # Sold/taken products: go out of stock!
+                    product.stock_quantity -= item.quantity
+                    product.update_variant_stock(item.quality, item.selected_head, -item.quantity)
+                # NOTE: 'buy' invoices do NOT auto-add stock — user adds stock manually
+                
+                product.save()
+                
+                # Create Stock History
+                from app.models import StockHistory
+                if instance.type == 'return' or (instance.type == 'exchange' and item.is_return):
+                    qty_change = 0
+                elif instance.type in ['sell', 'exchange'] and not item.is_return:
+                    qty_change = -item.quantity
+                else:
+                    qty_change = 0  # buy: no auto stock change
+                
+                StockHistory.objects.create(
+                    product=product,
+                    item_type=product.category,
+                    item_name=product.name,
+                    quantity_added=qty_change,
+                    stock_before=stock_before,
+                    stock_after=product.stock_quantity,
+                    note=f"Updated Invoice {instance.type}: {instance.id} {'(Return Part - Added to Returned Stock)' if item.is_return else ''}"
+                )
+                
+        return instance
 
 class CheckSerializer(serializers.ModelSerializer):
     partner_details = ContactSerializer(source='partner', read_only=True)
