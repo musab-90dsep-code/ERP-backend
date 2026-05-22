@@ -169,6 +169,25 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
         
+        # --- Handle Order Quantities Reverse for Old Items ---
+        order = instance.order
+        order_items_updated = False
+        
+        if order and order.items:
+            for item in instance.items.all():
+                if item.product:
+                    for order_item in order.items:
+                        match_product = str(order_item.get('product_id')) == str(item.product.id)
+                        match_head = order_item.get('selected_head', '') == item.selected_head
+                        match_quality = order_item.get('quality', '') == item.quality
+                        
+                        if match_product and match_head and match_quality:
+                            qty = float(item.quantity)
+                            current_invoiced = float(order_item.get('invoiced_quantity', 0))
+                            order_item['invoiced_quantity'] = max(0.0, current_invoiced - qty)
+                            order_items_updated = True
+                            break
+
         # 1. Reverse stock changes for all ORIGINAL items of this invoice
         for item in instance.items.all():
             if item.product:
@@ -195,6 +214,20 @@ class InvoiceSerializer(serializers.ModelSerializer):
         # 4. Create new items and apply their stock changes
         for item_data in items_data:
             item = InvoiceItem.objects.create(invoice=instance, **item_data)
+            
+            # --- Update order items invoiced_quantity ---
+            if order and order.items and item.product:
+                for order_item in order.items:
+                    match_product = str(order_item.get('product_id')) == str(item.product.id)
+                    match_head = order_item.get('selected_head', '') == item.selected_head
+                    match_quality = order_item.get('quality', '') == item.quality
+                    
+                    if match_product and match_head and match_quality:
+                        qty = float(item.quantity)
+                        current_invoiced = float(order_item.get('invoiced_quantity', 0))
+                        order_item['invoiced_quantity'] = current_invoiced + qty
+                        order_items_updated = True
+                        break
             
             if item.product:
                 product = item.product
@@ -230,6 +263,28 @@ class InvoiceSerializer(serializers.ModelSerializer):
                     stock_after=product.stock_quantity,
                     note=f"Updated Invoice {instance.type}: {instance.id} {'(Return Part - Added to Returned Stock)' if item.is_return else ''}"
                 )
+                
+        # --- Save Order Status if updated ---
+        if order and order_items_updated:
+            all_delivered = True
+            any_invoiced = False
+            
+            for o_item in order.items:
+                o_qty = float(o_item.get('quantity', 0))
+                i_qty = float(o_item.get('invoiced_quantity', 0))
+                if i_qty > 0:
+                    any_invoiced = True
+                if i_qty < o_qty:
+                    all_delivered = False
+                    
+            if all_delivered:
+                order.status = 'delivered'
+            elif any_invoiced:
+                order.status = 'partial'
+            else:
+                order.status = 'pending'
+                
+            order.save(update_fields=['items', 'status'])
                 
         return instance
 

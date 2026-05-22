@@ -316,7 +316,19 @@ class UnifiedAPIView(APIView):
             total_due = total_sell_amount - total_sell_payments
 
             # Stock Value Calculation
-            current_stock_val = float(Product.objects.filter(**({'shop_id': shop_id} if shop_id else {})).aggregate(total=Sum(F('stock_quantity') * F('price'), output_field=DecimalField()))['total'] or 0)
+            products_qs = Product.objects.filter(**({'shop_id': shop_id} if shop_id else {}))
+            current_stock_val = 0.0
+            for prod in products_qs:
+                if prod.variants and isinstance(prod.variants, list) and len(prod.variants) > 0:
+                    for variant in prod.variants:
+                        if isinstance(variant, dict):
+                            v_stock = float(variant.get('stock') or 0)
+                            v_price = float(variant.get('price') or 0)
+                            current_stock_val += v_stock * v_price
+                else:
+                    prod_stock = float(prod.stock_quantity or 0)
+                    prod_price = float(prod.price or 0)
+                    current_stock_val += prod_stock * prod_price
             running_stock_val = current_stock_val
             running_due = total_due
 

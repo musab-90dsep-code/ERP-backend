@@ -288,6 +288,47 @@ class Invoice(models.Model):
                         stock_after=product.stock_quantity,
                         note=f"Reverted Stock: Deleted Invoice {self.type}: {self.id} {'(Return Part - Reverted Returned Stock)' if item.is_return else ''}"
                     )
+
+        # --- Reverse Order items invoiced_quantity & Recalculate Order Status ---
+        order = self.order
+        if order and order.items:
+            order_items_updated = False
+            for item in self.items.all():
+                if item.product:
+                    for order_item in order.items:
+                        # Match by product, head, and quality to be precise
+                        match_product = str(order_item.get('product_id')) == str(item.product.id)
+                        match_head = order_item.get('selected_head', '') == item.selected_head
+                        match_quality = order_item.get('quality', '') == item.quality
+                        
+                        if match_product and match_head and match_quality:
+                            qty = float(item.quantity)
+                            current_invoiced = float(order_item.get('invoiced_quantity', 0))
+                            order_item['invoiced_quantity'] = max(0.0, current_invoiced - qty)
+                            order_items_updated = True
+                            break
+            
+            if order_items_updated:
+                # Recalculate order status
+                all_delivered = True
+                any_invoiced = False
+                for o_item in order.items:
+                    o_qty = float(o_item.get('quantity', 0))
+                    i_qty = float(o_item.get('invoiced_quantity', 0))
+                    if i_qty > 0:
+                        any_invoiced = True
+                    if i_qty < o_qty:
+                        all_delivered = False
+                
+                if all_delivered:
+                    order.status = 'delivered'
+                elif any_invoiced:
+                    order.status = 'partial'
+                else:
+                    order.status = 'pending'
+                
+                order.save(update_fields=['items', 'status'])
+
         super().delete(*args, **kwargs)
 
 class InvoiceItem(models.Model):
