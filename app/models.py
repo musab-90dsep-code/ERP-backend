@@ -247,42 +247,47 @@ class Invoice(models.Model):
     prepared_by = models.CharField(max_length=255, null=True, blank=True)
     warehouse = models.CharField(max_length=100, null=True, blank=True)
     notes = models.TextField(null=True, blank=True)
+    order = models.ForeignKey('Order', null=True, blank=True, on_delete=models.SET_NULL, related_name='invoices')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def delete(self, *args, **kwargs):
-        # Reverse stock change for all items
-        for item in self.items.all():
-            if item.product:
-                product = item.product
-                product.refresh_from_db()
-                stock_before = product.stock_quantity
-                if self.type == 'return' or (self.type == 'exchange' and item.is_return):
-                    # Originally did NOT change stock_quantity, only returned_stock_quantity!
-                    product.returned_stock_quantity = max(0, product.returned_stock_quantity - item.quantity)
-                elif self.type == 'sell' or (self.type == 'exchange' and not item.is_return):
-                    # Originally decreased stock, so now increase/revert it!
-                    product.stock_quantity += item.quantity
-                    product.update_variant_stock(item.quality, item.selected_head, item.quantity)
-                # NOTE: 'buy' invoices never changed stock automatically, so nothing to revert
-                product.save()
-                
-                # Create Stock History for reversion
-                from app.models import StockHistory
-                if self.type == 'return' or (self.type == 'exchange' and item.is_return):
-                    qty_change = 0
-                elif self.type in ['sell', 'exchange'] and not item.is_return:
-                    qty_change = item.quantity
-                else: # buy — no stock was changed, so nothing to revert
-                    qty_change = 0
-                StockHistory.objects.create(
-                    product=product,
-                    item_type=product.category,
-                    item_name=product.name,
-                    quantity_added=qty_change,
-                    stock_before=stock_before,
-                    stock_after=product.stock_quantity,
-                    note=f"Reverted Stock: Deleted Invoice {self.type}: {self.id} {'(Return Part - Reverted Returned Stock)' if item.is_return else ''}"
-                )
+        # Allow passing restock via kwargs if we manually call delete
+        restock = kwargs.pop('restock', True)
+
+        if restock:
+            # Reverse stock change for all items
+            for item in self.items.all():
+                if item.product:
+                    product = item.product
+                    product.refresh_from_db()
+                    stock_before = product.stock_quantity
+                    if self.type == 'return' or (self.type == 'exchange' and item.is_return):
+                        # Originally did NOT change stock_quantity, only returned_stock_quantity!
+                        product.returned_stock_quantity = max(0, product.returned_stock_quantity - item.quantity)
+                    elif self.type == 'sell' or (self.type == 'exchange' and not item.is_return):
+                        # Originally decreased stock, so now increase/revert it!
+                        product.stock_quantity += item.quantity
+                        product.update_variant_stock(item.quality, item.selected_head, item.quantity)
+                    # NOTE: 'buy' invoices never changed stock automatically, so nothing to revert
+                    product.save()
+                    
+                    # Create Stock History for reversion
+                    from app.models import StockHistory
+                    if self.type == 'return' or (self.type == 'exchange' and item.is_return):
+                        qty_change = 0
+                    elif self.type in ['sell', 'exchange'] and not item.is_return:
+                        qty_change = item.quantity
+                    else: # buy — no stock was changed, so nothing to revert
+                        qty_change = 0
+                    StockHistory.objects.create(
+                        product=product,
+                        item_type=product.category,
+                        item_name=product.name,
+                        quantity_added=qty_change,
+                        stock_before=stock_before,
+                        stock_after=product.stock_quantity,
+                        note=f"Reverted Stock: Deleted Invoice {self.type}: {self.id} {'(Return Part - Reverted Returned Stock)' if item.is_return else ''}"
+                    )
         super().delete(*args, **kwargs)
 
 class InvoiceItem(models.Model):

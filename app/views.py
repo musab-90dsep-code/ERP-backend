@@ -589,7 +589,16 @@ class UnifiedAPIView(APIView):
                 
                 try:
                     obj = ModelClass.objects.get(id=clean_id)
-                    obj.delete()
+                    if model_name == 'invoice':
+                        restock = True
+                        if isinstance(data, dict) and 'restock' in data:
+                            # if it comes as boolean or string
+                            r_val = data.get('restock')
+                            if str(r_val).lower() == 'false':
+                                restock = False
+                        obj.delete(restock=restock)
+                    else:
+                        obj.delete()
                     return Response({'message': f'{model_name.capitalize()} deleted successfully.'}, status=status.HTTP_200_OK)
                 except ModelClass.DoesNotExist:
                     return Response({'error': f'No {model_name} found with ID: {clean_id}'}, status=status.HTTP_404_NOT_FOUND)

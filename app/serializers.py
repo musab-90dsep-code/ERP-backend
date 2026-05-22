@@ -89,8 +89,27 @@ class InvoiceSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         invoice = Invoice.objects.create(**validated_data)
         
+        # --- Handle Order Partial Fulfillment ---
+        order = invoice.order
+        order_items_updated = False
+        
         for item_data in items_data:
             item = InvoiceItem.objects.create(invoice=invoice, **item_data)
+            
+            # Update order items invoiced_quantity
+            if order and order.items and item.product:
+                for order_item in order.items:
+                    # Match by product, head, and quality to be precise
+                    match_product = str(order_item.get('product_id')) == str(item.product.id)
+                    match_head = order_item.get('selected_head', '') == item.selected_head
+                    match_quality = order_item.get('quality', '') == item.quality
+                    
+                    if match_product and match_head and match_quality:
+                        qty = float(item.quantity)
+                        current_invoiced = float(order_item.get('invoiced_quantity', 0))
+                        order_item['invoiced_quantity'] = current_invoiced + qty
+                        order_items_updated = True
+                        break
             
             # Stock Update Logic
             if item.product:
@@ -99,13 +118,10 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 stock_before = product.stock_quantity
                 
                 if invoice.type == 'return' or (invoice.type == 'exchange' and item.is_return):
-                    # Returned products: ONLY go to returned_stock_quantity, NOT normal stock_quantity!
                     product.returned_stock_quantity += item.quantity
                 elif invoice.type == 'sell' or (invoice.type == 'exchange' and not item.is_return):
-                    # Sold/taken products: go out of stock!
                     product.stock_quantity -= item.quantity
                     product.update_variant_stock(item.quality, item.selected_head, -item.quantity)
-                # NOTE: 'buy' invoices do NOT auto-add stock — user adds stock manually
                 
                 product.save()
                 
@@ -116,7 +132,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 elif invoice.type in ['sell', 'exchange'] and not item.is_return:
                     qty_change = -item.quantity
                 else:
-                    qty_change = 0  # buy: no auto stock change
+                    qty_change = 0
                 
                 StockHistory.objects.create(
                     product=product,
@@ -127,6 +143,26 @@ class InvoiceSerializer(serializers.ModelSerializer):
                     stock_after=product.stock_quantity,
                     note=f"Invoice {invoice.type}: {invoice.id} {'(Return Part - Added to Returned Stock)' if item.is_return else ''}"
                 )
+                
+        # --- Save Order Status if updated ---
+        if order and order_items_updated:
+            all_delivered = True
+            any_invoiced = False
+            
+            for o_item in order.items:
+                o_qty = float(o_item.get('quantity', 0))
+                i_qty = float(o_item.get('invoiced_quantity', 0))
+                if i_qty > 0:
+                    any_invoiced = True
+                if i_qty < o_qty:
+                    all_delivered = False
+                    
+            if all_delivered:
+                order.status = 'delivered'
+            elif any_invoiced:
+                order.status = 'partial'
+                
+            order.save(update_fields=['items', 'status'])
                 
         return invoice
 
