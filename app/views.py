@@ -310,10 +310,27 @@ class UnifiedAPIView(APIView):
             # Balance Calculations
             running_balance = current_total_received - current_total_paid
             
-            # Total Due Calculation
-            total_sell_amount = float(Invoice.objects.filter(type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})).aggregate(s=Sum('total'))['s'] or 0)
-            total_sell_payments = float(Payment.objects.filter(invoice__type__in=['sell', 'exchange'], **({'shop_id': shop_id} if shop_id else {})).aggregate(s=Sum('amount'))['s'] or 0)
-            total_due = total_sell_amount - total_sell_payments
+            # Total Customer Due Calculation (summing all customer dues matching ContactSerializer logic)
+            customers_qs = Contact.objects.filter(type__in=['customer', 'processor'], **({'shop_id': shop_id} if shop_id else {}))
+            total_due = 0.0
+            for cust in customers_qs:
+                total_invoiced = float(Invoice.objects.filter(
+                    contact=cust, type__in=['sell', 'exchange']
+                ).aggregate(s=Sum('total'))['s'] or 0)
+
+                total_returned = float(Invoice.objects.filter(
+                    contact=cust, type='return'
+                ).aggregate(s=Sum('total'))['s'] or 0)
+
+                total_received = float(Payment.objects.filter(
+                    contact=cust, type='in'
+                ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                total_refunded = float(Payment.objects.filter(
+                    contact=cust, type='out'
+                ).aggregate(s=Sum('amount'))['s'] or 0)
+
+                total_due += (total_invoiced - total_returned) - (total_received - total_refunded)
 
             # Stock Value Calculation
             products_qs = Product.objects.filter(**({'shop_id': shop_id} if shop_id else {}))

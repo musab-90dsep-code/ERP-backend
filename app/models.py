@@ -322,18 +322,23 @@ class Invoice(models.Model):
             order_items_updated = False
             for item in self.items.all():
                 if item.product:
-                    for order_item in order.items:
-                        # Match by product, head, and quality to be precise
-                        match_product = str(order_item.get('product_id')) == str(item.product.id)
-                        match_head = order_item.get('selected_head', '') == item.selected_head
-                        match_quality = order_item.get('quality', '') == item.quality
-                        
-                        if match_product and match_head and match_quality:
-                            qty = float(item.quantity)
-                            current_invoiced = float(order_item.get('invoiced_quantity', 0))
-                            order_item['invoiced_quantity'] = max(0.0, current_invoiced - qty)
-                            order_items_updated = True
-                            break
+                    if not order.is_return or not item.is_return:
+                        for order_item in order.items:
+                            # Match by product, head, and quality to be precise
+                            match_product = str(order_item.get('product_id')) == str(item.product.id)
+                            if order.is_return:
+                                match_head = True
+                                match_quality = True
+                            else:
+                                match_head = order_item.get('selected_head', '') == item.selected_head
+                                match_quality = order_item.get('quality', '') == item.quality
+                            
+                            if match_product and match_head and match_quality:
+                                qty = float(item.quantity)
+                                current_invoiced = float(order_item.get('invoiced_quantity', 0))
+                                order_item['invoiced_quantity'] = max(0.0, current_invoiced - qty)
+                                order_items_updated = True
+                                break
             
             if order_items_updated:
                 # Recalculate order status
