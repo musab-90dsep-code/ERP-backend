@@ -173,6 +173,28 @@ class Product(models.Model):
     def __str__(self):
         return self.name
 
+    def save(self, *args, **kwargs):
+        if self.variants:
+            import json
+            variants_list = self.variants
+            if isinstance(variants_list, str):
+                try:
+                    variants_list = json.loads(variants_list)
+                except Exception:
+                    variants_list = []
+            
+            if isinstance(variants_list, list) and len(variants_list) > 0:
+                total_stock = 0.0
+                total_min_stock = 0.0
+                for v in variants_list:
+                    if isinstance(v, dict):
+                        total_stock += float(v.get('stock') or 0.0)
+                        total_min_stock += float(v.get('min_stock') or 0.0)
+                self.stock_quantity = total_stock
+                self.minimum_stock = total_min_stock
+        super().save(*args, **kwargs)
+
+
     def update_variant_stock(self, quality, head, quantity_change):
         """
         Update a variant's stock by matching the variant name.
@@ -242,6 +264,11 @@ class Invoice(models.Model):
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     due_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, default='unpaid', db_index=True)
+    due_date = models.DateField(null=True, blank=True)
+    reference = models.CharField(max_length=255, null=True, blank=True)
+    sales_person = models.CharField(max_length=255, null=True, blank=True)
+    shipping = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     authorized_signature = models.CharField(max_length=255, null=True, blank=True)
     received_by = models.CharField(max_length=255, null=True, blank=True)
     prepared_by = models.CharField(max_length=255, null=True, blank=True)
@@ -272,7 +299,6 @@ class Invoice(models.Model):
                     product.save()
                     
                     # Create Stock History for reversion
-                    from app.models import StockHistory
                     if self.type == 'return' or (self.type == 'exchange' and item.is_return):
                         qty_change = 0
                     elif self.type in ['sell', 'exchange'] and not item.is_return:
@@ -281,6 +307,7 @@ class Invoice(models.Model):
                         qty_change = 0
                     StockHistory.objects.create(
                         product=product,
+                        shop=self.shop,
                         item_type=product.category,
                         item_name=product.name,
                         quantity_added=qty_change,

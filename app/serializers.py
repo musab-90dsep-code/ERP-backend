@@ -45,10 +45,58 @@ class ContactEmployeeSerializer(serializers.ModelSerializer):
 
 class ContactSerializer(serializers.ModelSerializer):
     employees = ContactEmployeeSerializer(many=True, required=False)
+    due = serializers.SerializerMethodField()
+    total_due = serializers.SerializerMethodField()
 
     class Meta:
         model = Contact
         fields = '__all__'
+
+    def get_due(self, obj):
+        from django.db.models import Sum
+        contact_type = obj.type
+        if contact_type == 'customer' or contact_type == 'processor':
+            total_invoiced = float(Invoice.objects.filter(
+                contact=obj, type__in=['sell', 'exchange']
+            ).aggregate(s=Sum('total'))['s'] or 0)
+
+            total_returned = float(Invoice.objects.filter(
+                contact=obj, type='return'
+            ).aggregate(s=Sum('total'))['s'] or 0)
+
+            total_received = float(Payment.objects.filter(
+                contact=obj, type='in'
+            ).aggregate(s=Sum('amount'))['s'] or 0)
+
+            total_refunded = float(Payment.objects.filter(
+                contact=obj, type='out'
+            ).aggregate(s=Sum('amount'))['s'] or 0)
+
+            due = (total_invoiced - total_returned) - (total_received - total_refunded)
+
+        else:
+            total_purchased = float(Invoice.objects.filter(
+                contact=obj, type='buy'
+            ).aggregate(s=Sum('total'))['s'] or 0)
+
+            total_buy_returns = float(Invoice.objects.filter(
+                contact=obj, type='return'
+            ).aggregate(s=Sum('total'))['s'] or 0)
+
+            total_paid_out = float(Payment.objects.filter(
+                contact=obj, type='out'
+            ).aggregate(s=Sum('amount'))['s'] or 0)
+
+            total_received_back = float(Payment.objects.filter(
+                contact=obj, type='in'
+            ).aggregate(s=Sum('amount'))['s'] or 0)
+
+            due = (total_purchased - total_buy_returns) - (total_paid_out - total_received_back)
+
+        return round(due, 2)
+
+    def get_total_due(self, obj):
+        return self.get_due(obj)
 
     def create(self, validated_data):
         employees_data = validated_data.pop('employees', [])
@@ -126,7 +174,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 product.save()
                 
                 # Create Stock History
-                from app.models import StockHistory
                 if invoice.type == 'return' or (invoice.type == 'exchange' and item.is_return):
                     qty_change = 0
                 elif invoice.type in ['sell', 'exchange'] and not item.is_return:
@@ -136,6 +183,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 
                 StockHistory.objects.create(
                     product=product,
+                    shop=invoice.shop,
                     item_type=product.category,
                     item_name=product.name,
                     quantity_added=qty_change,
@@ -246,7 +294,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 product.save()
                 
                 # Create Stock History
-                from app.models import StockHistory
                 if instance.type == 'return' or (instance.type == 'exchange' and item.is_return):
                     qty_change = 0
                 elif instance.type in ['sell', 'exchange'] and not item.is_return:
@@ -256,6 +303,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 
                 StockHistory.objects.create(
                     product=product,
+                    shop=instance.shop,
                     item_type=product.category,
                     item_name=product.name,
                     quantity_added=qty_change,
